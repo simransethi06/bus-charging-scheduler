@@ -1,860 +1,887 @@
 """
-app.py — Bus Charging Scheduler · Streamlit UI
+app.py — Exponent Energy · Bus Charging Scheduler
+Killer UI: electric bus hero, dark/light mode, all plotly errors fixed
 """
 import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
 import json
-import math
 from pathlib import Path
-from datetime import datetime, timedelta
 
 from scheduler.runner import run_scenario, get_all_scenarios
-from scheduler.models import ScheduleResult, BusTimeline, ChargeEvent
+from scheduler.models import ScheduleResult, BusTimeline, ChargeEvent, Direction
 
-# ────────────────────────────────────────────
-#  Page config
-# ────────────────────────────────────────────
 st.set_page_config(
-    page_title="BusGrid Scheduler",
+    page_title="Exponent Energy · Charging Scheduler",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ────────────────────────────────────────────
-#  Global CSS — dark industrial theme
-# ────────────────────────────────────────────
-st.markdown("""
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = True
+
+def palette(dark):
+    if dark:
+        return dict(
+            bg="#060A12", bg2="#0A1020", bg3="#0E1628", bg4="#121E34",
+            card="#0D1828", border="#1C2E4A", border2="#243A5E",
+            text="#EEF2FF", text2="#7A8FAE", text3="#3D5070",
+            accent="#FFD000", accent2="#FF8C00",
+            blue="#1E7FFF", green="#00D97E", red="#FF4757",
+            purple="#A855F7", teal="#06B6D4", orange="#F97316",
+            plot_bg="#0A1020", grid="#1C2E4A",
+        )
+    else:
+        return dict(
+            bg="#F5F7FF", bg2="#FFFFFF", bg3="#EBF0FF", bg4="#E0E8FF",
+            card="#FFFFFF", border="#C8D5F0", border2="#AABDE0",
+            text="#0A1628", text2="#3A5070", text3="#8AA0C0",
+            accent="#D4A500", accent2="#E06000",
+            blue="#1155CC", green="#15803D", red="#CC2222",
+            purple="#7E22CE", teal="#0E7490", orange="#C2410C",
+            plot_bg="#FFFFFF", grid="#DDE8FF",
+        )
+
+P = palette(st.session_state.dark_mode)
+DARK = st.session_state.dark_mode
+
+OP_COLORS = {"kpn": P["blue"], "freshbus": P["green"], "flixbus": P["purple"]}
+STN_COLORS = {"A": P["accent"], "B": P["blue"], "C": P["purple"], "D": P["teal"]}
+
+# ─── Electric bus SVG (side-profile, scalable) ────────────────────────────────
+BUS_SVG = """
+<svg viewBox="0 0 320 100" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;">
+  <defs>
+    <linearGradient id="bodyGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1E3A5F"/>
+      <stop offset="100%" stop-color="#0A1E35"/>
+    </linearGradient>
+    <linearGradient id="windowGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7FAAFF" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#1E5FBF" stop-opacity="0.3"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <!-- body -->
+  <rect x="10" y="28" width="285" height="52" rx="8" fill="url(#bodyGrad)" stroke="#1E4080" stroke-width="1"/>
+  <!-- accent stripe -->
+  <rect x="10" y="42" width="285" height="4" fill="#FFD000" opacity="0.9"/>
+  <!-- windows -->
+  <rect x="30" y="33" width="28" height="18" rx="3" fill="url(#windowGrad)" stroke="#4080CC" stroke-width="0.5"/>
+  <rect x="65" y="33" width="28" height="18" rx="3" fill="url(#windowGrad)" stroke="#4080CC" stroke-width="0.5"/>
+  <rect x="100" y="33" width="28" height="18" rx="3" fill="url(#windowGrad)" stroke="#4080CC" stroke-width="0.5"/>
+  <rect x="135" y="33" width="28" height="18" rx="3" fill="url(#windowGrad)" stroke="#4080CC" stroke-width="0.5"/>
+  <rect x="170" y="33" width="28" height="18" rx="3" fill="url(#windowGrad)" stroke="#4080CC" stroke-width="0.5"/>
+  <rect x="205" y="33" width="28" height="18" rx="3" fill="url(#windowGrad)" stroke="#4080CC" stroke-width="0.5"/>
+  <!-- front -->
+  <rect x="268" y="30" width="27" height="46" rx="6" fill="#0D2040" stroke="#1E4080" stroke-width="1"/>
+  <rect x="270" y="34" width="22" height="14" rx="2" fill="url(#windowGrad)" stroke="#4080CC" stroke-width="0.5"/>
+  <!-- headlight -->
+  <ellipse cx="289" cy="55" rx="4" ry="3" fill="#FFD000" opacity="0.9" filter="url(#glow)"/>
+  <!-- wheels -->
+  <circle cx="60" cy="80" r="14" fill="#111" stroke="#333" stroke-width="2"/>
+  <circle cx="60" cy="80" r="8" fill="#222" stroke="#FFD000" stroke-width="1.5"/>
+  <circle cx="60" cy="80" r="3" fill="#FFD000"/>
+  <circle cx="230" cy="80" r="14" fill="#111" stroke="#333" stroke-width="2"/>
+  <circle cx="230" cy="80" r="8" fill="#222" stroke="#FFD000" stroke-width="1.5"/>
+  <circle cx="230" cy="80" r="3" fill="#FFD000"/>
+  <!-- undercarriage -->
+  <rect x="25" y="72" width="250" height="8" rx="2" fill="#0A1828"/>
+  <!-- e^pack label -->
+  <text x="140" y="60" font-family="monospace" font-size="7" fill="#FFD000" opacity="0.7" text-anchor="middle">e^pack · 320kWh · 15min charge</text>
+  <!-- charge port -->
+  <rect x="12" y="48" width="8" height="10" rx="2" fill="#FFD000" opacity="0.8"/>
+  <text x="16" y="56" font-family="monospace" font-size="5" fill="#000" text-anchor="middle">⚡</text>
+</svg>
+"""
+
+LIGHTNING_BG = """
+<svg viewBox="0 0 1200 600" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid slice" style="position:absolute;top:0;left:0;width:100%;height:100%;opacity:0.04;">
+  <polygon points="600,50 680,250 620,250 700,550 540,300 610,300" fill="#FFD000"/>
+  <polygon points="200,80 260,220 220,220 280,450 170,260 230,260" fill="#FFD000" opacity="0.5"/>
+  <polygon points="950,100 1010,240 970,240 1030,440 920,270 980,270" fill="#FFD000" opacity="0.5"/>
+</svg>
+"""
+
+# ─── CSS ──────────────────────────────────────────────────────────────────────
+st.markdown(f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
-/* ── reset ── */
-*, *::before, *::after { box-sizing: border-box; }
+:root {{
+  --bg:{P['bg']}; --bg2:{P['bg2']}; --bg3:{P['bg3']}; --bg4:{P['bg4']};
+  --card:{P['card']}; --border:{P['border']}; --border2:{P['border2']};
+  --text:{P['text']}; --text2:{P['text2']}; --text3:{P['text3']};
+  --accent:{P['accent']}; --accent2:{P['accent2']};
+  --blue:{P['blue']}; --green:{P['green']}; --red:{P['red']};
+  --purple:{P['purple']}; --teal:{P['teal']};
+}}
 
-html, body, [data-testid="stAppViewContainer"] {
-    background: #0a0c0f !important;
-    color: #e2e8f0;
-    font-family: 'DM Sans', sans-serif;
-}
+html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"], .main {{
+  background: var(--bg) !important; color: var(--text) !important;
+  font-family: 'Space Grotesk', sans-serif !important;
+}}
+[data-testid="stSidebar"] {{
+  background: var(--bg2) !important;
+  border-right: 1px solid var(--border) !important;
+}}
+[data-testid="stSidebar"] * {{ color: var(--text2) !important; }}
+[data-testid="stSidebar"] label {{ color: var(--text) !important; font-weight:600 !important; }}
+#MainMenu, footer, header, [data-testid="stToolbar"], [data-testid="stDecoration"] {{ display:none !important; }}
 
-[data-testid="stSidebar"] {
-    background: #0d1117 !important;
-    border-right: 1px solid #1e2736;
-}
+h1,h2,h3,h4 {{ font-family:'Bebas Neue',sans-serif !important; color:var(--text) !important; letter-spacing:0.04em; }}
 
-[data-testid="stSidebar"] * { color: #c9d1d9 !important; }
+/* tabs */
+[data-testid="stTabs"] [role="tab"] {{
+  font-family:'JetBrains Mono',monospace !important; font-size:11px !important;
+  color:var(--text3) !important; border-bottom:2px solid transparent !important;
+  padding:10px 18px !important; text-transform:uppercase; letter-spacing:0.1em;
+}}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{
+  color:var(--accent) !important; border-bottom-color:var(--accent) !important;
+}}
+[data-testid="stTabs"] [role="tablist"] {{
+  border-bottom:1px solid var(--border) !important; background:transparent !important;
+  gap:4px !important;
+}}
 
-/* ── headings ── */
-h1, h2, h3 { font-family: 'Space Mono', monospace !important; letter-spacing: -0.02em; }
+/* selectbox */
+[data-testid="stSelectbox"] > div > div {{
+  background:var(--bg3) !important; border-color:var(--border) !important; color:var(--text) !important;
+}}
+[data-baseweb="select"] span {{ color:var(--text) !important; }}
 
-/* ── hide streamlit chrome ── */
-#MainMenu, footer, header { visibility: hidden; }
-[data-testid="stToolbar"] { display: none; }
+/* dataframe */
+[data-testid="stDataFrame"] {{ border-radius:10px !important; overflow:hidden !important; }}
 
-/* ── metric cards ── */
-.metric-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0; }
-.metric-card {
-    background: #111827;
-    border: 1px solid #1f2d3d;
-    border-radius: 10px;
-    padding: 18px 22px;
-    flex: 1;
-    min-width: 140px;
-    position: relative;
-    overflow: hidden;
-}
-.metric-card::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 2px;
-    background: var(--accent, #3b82f6);
-}
-.metric-label {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: #6b7280;
-    margin-bottom: 6px;
-    font-family: 'Space Mono', monospace;
-}
-.metric-value {
-    font-size: 26px;
-    font-weight: 700;
-    font-family: 'Space Mono', monospace;
-    color: #f1f5f9;
-    line-height: 1;
-}
-.metric-sub {
-    font-size: 11px;
-    color: #4b5563;
-    margin-top: 4px;
-}
+/* slider thumb */
+[data-testid="stSlider"] [role="slider"] {{ background:var(--accent) !important; border-color:var(--accent) !important; }}
 
-/* ── section header ── */
-.section-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin: 28px 0 14px;
-    padding-bottom: 10px;
-    border-bottom: 1px solid #1e2736;
-}
-.section-header h3 {
-    margin: 0;
-    font-size: 13px;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: #94a3b8;
-    font-family: 'Space Mono', monospace;
-}
-.section-dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: #3b82f6;
-    flex-shrink: 0;
-}
+/* ── HERO ── */
+.hero {{
+  position:relative; overflow:hidden;
+  background: linear-gradient(135deg, {'#020810' if DARK else '#E8F0FF'} 0%, {'#060F20' if DARK else '#D0DFFF'} 50%, {'#030C18' if DARK else '#C8D8FF'} 100%);
+  border:1px solid var(--border); border-radius:16px;
+  padding:0; margin-bottom:24px; min-height:180px;
+}}
+.hero-content {{
+  position:relative; z-index:2;
+  padding:28px 32px;
+  display:flex; justify-content:space-between; align-items:center;
+}}
+.hero-left {{ flex:1; }}
+.hero-badge {{
+  display:inline-flex; align-items:center; gap:6px;
+  background:{'#FFD00015' if DARK else '#D4A50015'}; border:1px solid {'#FFD00030' if DARK else '#D4A50030'};
+  border-radius:20px; padding:4px 12px;
+  font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--accent);
+  text-transform:uppercase; letter-spacing:0.12em; margin-bottom:12px;
+}}
+.hero-title {{
+  font-family:'Bebas Neue',sans-serif; font-size:52px; line-height:0.9;
+  color:var(--text); letter-spacing:0.02em; margin-bottom:8px;
+}}
+.hero-title span {{ color:var(--accent); }}
+.hero-sub {{
+  font-family:'JetBrains Mono',monospace; font-size:11px;
+  color:var(--text3); text-transform:uppercase; letter-spacing:0.12em;
+}}
+.hero-bus {{
+  width:360px; flex-shrink:0; position:relative; z-index:2;
+  filter:{'drop-shadow(0 0 20px rgba(255,208,0,0.15))' if DARK else 'drop-shadow(0 4px 12px rgba(0,0,0,0.1))'};
+}}
+.hero-stats {{
+  display:flex; gap:24px; margin-top:20px; flex-wrap:wrap;
+}}
+.hero-stat-item {{
+  font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--text3);
+}}
+.hero-stat-item b {{ color:var(--accent); font-size:14px; display:block; margin-bottom:2px; }}
 
-/* ── bus card ── */
-.bus-card {
-    background: #111827;
-    border: 1px solid #1f2d3d;
-    border-radius: 10px;
-    padding: 16px;
-    margin-bottom: 10px;
-    transition: border-color 0.2s;
-}
-.bus-card:hover { border-color: #3b82f6; }
-.bus-card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 12px;
-}
-.bus-id {
-    font-family: 'Space Mono', monospace;
-    font-size: 13px;
-    font-weight: 700;
-    color: #60a5fa;
-}
-.operator-badge {
-    padding: 2px 10px;
-    border-radius: 20px;
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-family: 'Space Mono', monospace;
-}
-.op-kpn      { background: #1e3a5f; color: #60a5fa; border: 1px solid #2563eb33; }
-.op-freshbus { background: #1a3d2b; color: #4ade80; border: 1px solid #16a34a33; }
-.op-flixbus  { background: #3b1f5e; color: #c084fc; border: 1px solid #7c3aed33; }
-.op-default  { background: #1f2937; color: #9ca3af; border: 1px solid #37415133; }
+/* ── SCENARIO CARD ── */
+.sc-card {{
+  background:var(--card); border:1px solid var(--border);
+  border-left:4px solid var(--accent);
+  border-radius:12px; padding:18px 22px; margin-bottom:20px;
+  display:flex; justify-content:space-between; align-items:flex-start;
+}}
+.sc-name {{ font-family:'Bebas Neue',sans-serif; font-size:26px; color:var(--text); letter-spacing:0.04em; }}
+.sc-desc {{ font-size:13px; color:var(--text2); margin-top:4px; line-height:1.5; }}
+.tag {{ display:inline-block; padding:2px 9px; border-radius:4px; background:var(--bg3); border:1px solid var(--border); font-family:'JetBrains Mono',monospace; font-size:9px; color:var(--text3); margin:4px 3px 0 0; text-transform:uppercase; letter-spacing:0.08em; }}
+.valid-badge {{ display:inline-block; padding:4px 12px; border-radius:6px; font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:700; letter-spacing:0.08em; }}
 
-/* ── timeline strip ── */
-.timeline-strip {
-    display: flex;
-    align-items: center;
-    gap: 0;
-    overflow: hidden;
-    border-radius: 6px;
-    height: 28px;
-    font-size: 10px;
-}
-.tl-seg {
-    height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-family: 'Space Mono', monospace;
-    font-size: 9px;
-    white-space: nowrap;
-    overflow: hidden;
-}
-.tl-drive { background: #1e3a5f; color: #93c5fd; }
-.tl-wait  { background: #3b1f1f; color: #f87171; }
-.tl-charge{ background: #1a3d2b; color: #4ade80; }
+/* ── KPI ── */
+.kpi-row {{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:22px; }}
+.kpi {{
+  flex:1; min-width:120px;
+  background:var(--card); border:1px solid var(--border); border-radius:10px;
+  padding:14px 16px; position:relative; overflow:hidden;
+  transition: border-color 0.2s;
+}}
+.kpi:hover {{ border-color:var(--border2); }}
+.kpi::before {{
+  content:''; position:absolute; top:0; left:0; right:0; height:3px;
+  background:var(--kc, var(--accent));
+}}
+.kpi-lbl {{ font-family:'JetBrains Mono',monospace; font-size:9px; text-transform:uppercase; letter-spacing:0.12em; color:var(--text3); margin-bottom:6px; }}
+.kpi-val {{ font-family:'Bebas Neue',sans-serif; font-size:32px; line-height:1; color:var(--text); }}
+.kpi-unit {{ font-family:'Space Grotesk',sans-serif; font-size:12px; font-weight:400; color:var(--text2); margin-left:2px; }}
+.kpi-sub {{ font-size:10px; color:var(--text3); margin-top:3px; }}
 
-/* ── station queue ── */
-.queue-entry {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 14px;
-    background: #0d1117;
-    border: 1px solid #1f2d3d;
-    border-radius: 8px;
-    margin-bottom: 6px;
-}
-.queue-number {
-    font-family: 'Space Mono', monospace;
-    font-size: 18px;
-    font-weight: 700;
-    color: #374151;
-    min-width: 28px;
-    text-align: right;
-}
-.queue-bus-id {
-    font-family: 'Space Mono', monospace;
-    font-size: 12px;
-    color: #60a5fa;
-    font-weight: 700;
-}
-.queue-time {
-    font-family: 'Space Mono', monospace;
-    font-size: 11px;
-    color: #6b7280;
-    margin-left: auto;
-}
-.queue-wait-badge {
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 10px;
-    font-family: 'Space Mono', monospace;
-}
-.wait-zero { background: #1a3d2b; color: #4ade80; }
-.wait-low  { background: #1e3a2b; color: #86efac; }
-.wait-mid  { background: #3b2f1a; color: #fbbf24; }
-.wait-high { background: #3b1f1f; color: #f87171; }
+/* ── SECTION LABEL ── */
+.sl {{
+  font-family:'JetBrains Mono',monospace; font-size:9px; text-transform:uppercase;
+  letter-spacing:0.18em; color:var(--text3);
+  display:flex; align-items:center; gap:8px;
+  margin:24px 0 14px; padding-bottom:8px;
+  border-bottom:1px solid var(--border);
+}}
+.sl em {{ color:var(--accent); font-style:normal; }}
 
-/* ── scenario badge ── */
-.scenario-pill {
-    display: inline-flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    margin-bottom: 8px;
-}
-.tag-pill {
-    background: #1e2736;
-    color: #64748b;
-    padding: 2px 10px;
-    border-radius: 20px;
-    font-size: 10px;
-    font-family: 'Space Mono', monospace;
-    border: 1px solid #263347;
-}
+/* ── ROUTE STRIP ── */
+.rstrip {{
+  background:var(--card); border:1px solid var(--border);
+  border-radius:12px; padding:22px 28px;
+  display:flex; align-items:center; overflow-x:auto;
+  gap:0; position:relative;
+}}
+.rnode {{ display:flex; flex-direction:column; align-items:center; gap:5px; flex-shrink:0; }}
+.rcircle {{
+  width:46px; height:46px; border-radius:50%;
+  display:flex; align-items:center; justify-content:center;
+  font-family:'Bebas Neue',sans-serif; font-size:14px; letter-spacing:0.05em;
+}}
+.rterm {{ background:{'#1E7FFF15' if DARK else '#1155CC10'}; border:2px solid var(--blue); color:var(--blue); }}
+.rstn  {{ border:2px solid; }}
+.rname {{ font-family:'JetBrains Mono',monospace; font-size:9px; color:var(--text3); text-align:center; max-width:52px; }}
+.rline {{ flex:1; min-width:40px; position:relative; display:flex; align-items:center; }}
+.rline-inner {{ height:2px; width:100%; background:linear-gradient(90deg, var(--border), var(--border2)); }}
+.rdist {{ font-family:'JetBrains Mono',monospace; font-size:8px; color:var(--text3); position:absolute; top:-13px; white-space:nowrap; left:50%; transform:translateX(-50%); }}
 
-/* ── violation banner ── */
-.violation-banner {
-    background: #3b1f1f;
-    border: 1px solid #7f1d1d;
-    border-radius: 8px;
-    padding: 12px 16px;
-    margin-bottom: 16px;
-}
-.violation-banner b { color: #f87171; font-family: 'Space Mono', monospace; }
+/* ── BUS ROW ── */
+.bus-row {{
+  background:var(--card); border:1px solid var(--border);
+  border-radius:10px; padding:14px 16px; margin-bottom:8px;
+  display:flex; align-items:flex-start; gap:16px;
+}}
+.bus-row:hover {{ border-color:var(--border2); }}
+.bus-id {{ font-family:'JetBrains Mono',monospace; font-size:13px; font-weight:700; color:var(--blue); }}
+.op-pill {{ display:inline-block; padding:2px 8px; border-radius:4px; font-family:'JetBrains Mono',monospace; font-size:9px; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; }}
+.wait-chip {{ padding:2px 8px; border-radius:4px; font-family:'JetBrains Mono',monospace; font-size:9px; font-weight:600; }}
+.mini-lbl {{ font-size:9px; color:var(--text3); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:2px; }}
+.mini-val {{ font-family:'JetBrains Mono',monospace; font-size:13px; }}
 
-/* ── hero header ── */
-.hero {
-    padding: 32px 0 24px;
-    border-bottom: 1px solid #1e2736;
-    margin-bottom: 24px;
-}
-.hero-label {
-    font-family: 'Space Mono', monospace;
-    font-size: 11px;
-    color: #3b82f6;
-    text-transform: uppercase;
-    letter-spacing: 0.15em;
-    margin-bottom: 8px;
-}
-.hero-title {
-    font-family: 'Space Mono', monospace;
-    font-size: 36px;
-    font-weight: 700;
-    color: #f1f5f9;
-    line-height: 1.1;
-    margin: 0 0 8px;
-}
-.hero-sub {
-    color: #6b7280;
-    font-size: 14px;
-    max-width: 540px;
-}
+/* ── STATION CARD ── */
+.sq-card {{ background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden; margin-bottom:14px; }}
+.sq-hd {{ padding:14px 16px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }}
+.sq-row {{ display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--border); }}
+.sq-row:last-child {{ border-bottom:none; }}
 
-/* ── route map ── */
-.route-map {
-    display: flex;
-    align-items: center;
-    gap: 0;
-    padding: 20px;
-    background: #111827;
-    border: 1px solid #1f2d3d;
-    border-radius: 10px;
-    overflow-x: auto;
-}
-.stop-node {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-}
-.stop-circle {
-    width: 36px; height: 36px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-family: 'Space Mono', monospace;
-    font-size: 11px;
-    font-weight: 700;
-}
-.stop-terminal { background: #1e3a5f; border: 2px solid #3b82f6; color: #60a5fa; }
-.stop-station  { background: #1a3d2b; border: 2px solid #16a34a; color: #4ade80; }
-.stop-label { font-size: 9px; color: #6b7280; font-family: 'Space Mono', monospace; text-align: center; }
-.route-line {
-    height: 2px;
-    flex: 1;
-    min-width: 40px;
-    background: linear-gradient(90deg, #1f2d3d, #2d3f54);
-    position: relative;
-}
-.route-dist {
-    font-size: 9px;
-    color: #4b5563;
-    text-align: center;
-    position: absolute;
-    top: -14px;
-    left: 50%;
-    transform: translateX(-50%);
-    white-space: nowrap;
-    font-family: 'Space Mono', monospace;
-}
+/* ── violation ── */
+.vbox {{
+  background:{'#200808' if DARK else '#FFF0F0'}; border:1px solid {'#5C1A1A' if DARK else '#FFBBBB'};
+  border-radius:8px; padding:12px 16px; margin-bottom:16px;
+  font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--red);
+}}
 
-/* ── weight sliders ── */
-[data-testid="stSlider"] > div > div { background: #1e2736 !important; }
-[data-testid="stSlider"] [data-baseweb="slider"] div[role="slider"] {
-    background: #3b82f6 !important;
-    border-color: #3b82f6 !important;
-}
-
-/* ── tables ── */
-[data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
-thead { background: #111827 !important; }
-
-/* ── direction chips ── */
-.dir-blr { color: #f59e0b; font-size: 11px; font-family: 'Space Mono', monospace; }
-.dir-kbl { color: #a78bfa; font-size: 11px; font-family: 'Space Mono', monospace; }
-
-/* ── validity badge ── */
-.valid-badge   { background: #1a3d2b; color: #4ade80; padding: 3px 12px; border-radius: 20px; font-size: 11px; font-family: 'Space Mono', monospace; border: 1px solid #16a34a44; }
-.invalid-badge { background: #3b1f1f; color: #f87171; padding: 3px 12px; border-radius: 20px; font-size: 11px; font-family: 'Space Mono', monospace; border: 1px solid #7f1d1d44; }
+/* ── charge bar mini ── */
+.cbar-wrap {{ height:3px; background:var(--bg3); border-radius:2px; overflow:hidden; margin-top:4px; }}
+.cbar {{ height:3px; border-radius:2px; }}
 </style>
 """, unsafe_allow_html=True)
 
 
-# ────────────────────────────────────────────
-#  Helpers
-# ────────────────────────────────────────────
+# ─── helpers ──────────────────────────────────────────────────────────────────
+def fmt(m):
+    h, mm = int(m // 60) % 24, int(m % 60)
+    return f"{h:02d}:{mm:02d}"
 
-def fmt_time(minutes: float) -> str:
-    h = int(minutes // 60)
-    m = int(minutes % 60)
-    return f"{h:02d}:{m:02d}"
+def dur(m):
+    if m < 1: return "0m"
+    h, mm = int(m // 60), int(m % 60)
+    return f"{h}h {mm:02d}m" if h else f"{mm}m"
 
+def op_pill(op):
+    c = OP_COLORS.get(op, P["text3"])
+    return f'<span class="op-pill" style="background:{c}20;color:{c};border:1px solid {c}40;">{op.upper()}</span>'
 
-def fmt_duration(minutes: float) -> str:
-    h = int(minutes // 60)
-    m = int(minutes % 60)
-    if h > 0:
-        return f"{h}h {m:02d}m"
-    return f"{m}m"
+def wait_chip(w):
+    if w < 1:    c, t = P["green"], "✓ no wait"
+    elif w < 20: c, t = P["accent"], f"⏱ +{dur(w)}"
+    elif w < 50: c, t = P["accent2"], f"⚠ +{dur(w)}"
+    else:        c, t = P["red"], f"✗ +{dur(w)}"
+    return f'<span class="wait-chip" style="background:{c}20;color:{c};border:1px solid {c}40;">{t}</span>'
 
-
-def operator_badge(op: str) -> str:
-    cls = f"op-{op.lower()}" if op.lower() in ["kpn", "freshbus", "flixbus"] else "op-default"
-    return f'<span class="operator-badge {cls}">{op}</span>'
-
-
-def wait_badge(wait_min: float) -> str:
-    if wait_min < 1:
-        cls, label = "wait-zero", "No wait"
-    elif wait_min < 15:
-        cls, label = "wait-low", f"+{fmt_duration(wait_min)}"
-    elif wait_min < 35:
-        cls, label = "wait-mid", f"+{fmt_duration(wait_min)}"
-    else:
-        cls, label = "wait-high", f"+{fmt_duration(wait_min)}"
-    return f'<span class="queue-wait-badge {cls}">{label}</span>'
+def pcolor(p): return f"rgba({int(p[1:3],16)},{int(p[3:5],16)},{int(p[5:7],16)},0)"
 
 
-STATION_COLOR = {
-    "A": "#f59e0b",
-    "B": "#3b82f6",
-    "C": "#a855f7",
-    "D": "#10b981",
-}
-
-OP_COLOR = {
-    "kpn":      "#3b82f6",
-    "freshbus": "#22c55e",
-    "flixbus":  "#a855f7",
-}
-
-
-# ────────────────────────────────────────────
-#  Sidebar
-# ────────────────────────────────────────────
-
+# ─── load ──────────────────────────────────────────────────────────────────────
 scenarios_dir = Path(__file__).parent / "scenarios"
 all_scenarios = get_all_scenarios(scenarios_dir)
 
+
+# ─── sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("""
-    <div style="padding: 8px 0 20px;">
-        <div style="font-family: 'Space Mono', monospace; font-size: 11px; color: #3b82f6; 
-                    text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 4px;">
-            BusGrid
-        </div>
-        <div style="font-family: 'Space Mono', monospace; font-size: 18px; font-weight: 700; color: #f1f5f9;">
-            Charging Scheduler
-        </div>
-        <div style="font-size: 11px; color: #4b5563; margin-top: 4px;">
-            Bengaluru ↔ Kochi · 540 km
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("### Scenario")
-    scenario_labels = [s[2] for s in all_scenarios]
-    selected_idx = st.selectbox(
-        "Select scenario",
-        range(len(all_scenarios)),
-        format_func=lambda i: scenario_labels[i],
-        label_visibility="collapsed",
-    )
-    selected_path = all_scenarios[selected_idx][0]
-
-    st.markdown("---")
-    st.markdown("### Weight Tuning")
-    st.caption("Adjust soft-rule weights. Changes re-run the scheduler instantly.")
-
-    # Load defaults from scenario
-    scenario_data = json.loads(Path(selected_path).read_text())
-    def_w = scenario_data["weights"]
-
-    w_individual = st.slider("Individual (bus wait)", 0.0, 3.0, float(def_w["individual"]), 0.1)
-    w_operator   = st.slider("Operator (fleet equity)", 0.0, 3.0, float(def_w["operator"]),   0.1)
-    w_overall    = st.slider("Overall (throughput)", 0.0, 3.0, float(def_w["overall"]),   0.1)
-
-    st.markdown("---")
-    st.markdown("### Physics")
-    meta_world = scenario_data["world"]["physics"]
     st.markdown(f"""
-    <div style="font-family: 'Space Mono', monospace; font-size: 10px; color: #4b5563; line-height: 2;">
-        Range: <span style="color:#94a3b8">{meta_world['battery_range_km']} km</span><br>
-        Charge: <span style="color:#94a3b8">{meta_world['charge_duration_min']} min</span><br>
-        Speed: <span style="color:#94a3b8">{meta_world['speed_kmph']} km/h</span>
+    <div style="padding:14px 0 18px;border-bottom:1px solid {P['border']};margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <svg width="30" height="30" viewBox="0 0 28 28">
+          <polygon points="17,1 25,1 9,13 19,13 3,27 9,15 1,15 17,1" fill="{P['accent']}"/>
+        </svg>
+        <div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:{P['text']};letter-spacing:0.04em;">EXPONENT</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:8px;color:{P['text3']};letter-spacing:0.14em;text-transform:uppercase;">Energy · Scheduler</div>
+        </div>
+      </div>
     </div>
     """, unsafe_allow_html=True)
 
+    if st.button("☀️ Light Mode" if DARK else "🌙 Dark Mode", use_container_width=True):
+        st.session_state.dark_mode = not DARK
+        st.rerun()
+
+    st.markdown(f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:9px;text-transform:uppercase;letter-spacing:0.12em;color:{P["text3"]};margin:16px 0 6px;">Scenario</div>', unsafe_allow_html=True)
+    labels = [s[2] for s in all_scenarios]
+    idx = st.selectbox("Scenario", range(len(all_scenarios)), format_func=lambda i: labels[i], label_visibility="collapsed")
+    sel_path = all_scenarios[idx][0]
+    sdata = json.loads(Path(sel_path).read_text())
+    dw = sdata["weights"]
+
+    st.markdown(f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:9px;text-transform:uppercase;letter-spacing:0.12em;color:{P["text3"]};margin:16px 0 4px;">⚡ Weight Tuning</div>', unsafe_allow_html=True)
+    st.caption("Live re-runs scheduler on change.")
+    w_i = st.slider("🧍 Individual",   0.0, 3.0, float(dw["individual"]), 0.1)
+    w_o = st.slider("🏢 Operator",     0.0, 3.0, float(dw["operator"]),   0.1)
+    w_g = st.slider("🌐 Overall",      0.0, 3.0, float(dw["overall"]),    0.1)
+
     st.markdown("---")
-    st.caption("v1.0 · BusGrid Scheduler")
+    phy = sdata["world"]["physics"]
+    st.markdown(f"""
+    <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:{P['text3']};line-height:2.2;">
+      <span style="color:{P['accent']};">e^pack</span> &nbsp; {phy['battery_range_km']} km range<br>
+      <span style="color:{P['accent']};">e^pump</span> &nbsp; {phy['charge_duration_min']} min charge<br>
+      <span style="color:{P['accent']};">speed</span> &nbsp; {phy['speed_kmph']} km/h
+    </div>
+    """, unsafe_allow_html=True)
 
 
-# ────────────────────────────────────────────
-#  Run scheduler
-# ────────────────────────────────────────────
-
+# ─── run ───────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
-def cached_run(path_str: str, wi: float, wo: float, wg: float):
-    return run_scenario(
-        path_str,
-        weight_overrides={"individual": wi, "operator": wo, "overall": wg}
-    )
+def run(path, wi, wo, wg):
+    return run_scenario(path, weight_overrides={"individual": wi, "operator": wo, "overall": wg})
 
-with st.spinner("Running scheduler…"):
-    result: ScheduleResult = cached_run(
-        str(selected_path), w_individual, w_operator, w_overall
-    )
+with st.spinner("⚡ Computing schedule…"):
+    result: ScheduleResult = run(str(sel_path), w_i, w_o, w_g)
 
-s_meta = scenario_data["meta"]
+smeta = sdata["meta"]
+buses_raw = sdata["buses"]
+N = len(result.bus_timelines)
+waits = [t.total_wait_min for t in result.bus_timelines]
+trips = [t.total_trip_min for t in result.bus_timelines]
+avg_w = sum(waits) / max(N, 1)
+max_w = max(waits) if waits else 0
+avg_t = sum(trips) / max(N, 1)
+zero_w = sum(1 for w in waits if w < 1)
+tot_ev = sum(len(t.charge_events) for t in result.bus_timelines)
 
 
-# ────────────────────────────────────────────
-#  Hero header
-# ────────────────────────────────────────────
+# ─── HERO ──────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div class="hero">
-    <div class="hero-label">Electric Bus Charging Scheduler</div>
-    <div class="hero-title">{s_meta['name']}</div>
-    <div class="hero-sub">{s_meta['description']}</div>
-    <div style="margin-top: 14px;" class="scenario-pill">
-        {''.join(f'<span class="tag-pill">#{t}</span>' for t in s_meta.get('tags', []))}
-        <span class="{'valid-badge' if result.is_valid else 'invalid-badge'}">
-            {'✓ Valid Schedule' if result.is_valid else '✗ Violations Found'}
-        </span>
+  {LIGHTNING_BG}
+  <div class="hero-content">
+    <div class="hero-left">
+      <div class="hero-badge">⚡ Exponent Energy · Internal Tool</div>
+      <div class="hero-title">ELECTRIC BUS<br><span>CHARGING</span><br>SCHEDULER</div>
+      <div class="hero-sub">Bengaluru ↔ Kochi · 540 km · 4 e^pump Stations</div>
+      <div class="hero-stats">
+        <div class="hero-stat-item"><b>15 min</b>e^pump charge</div>
+        <div class="hero-stat-item"><b>1 MW</b>charging power</div>
+        <div class="hero-stat-item"><b>320 kWh</b>e^pack size</div>
+        <div class="hero-stat-item"><b>3000</b>battery cycles</div>
+      </div>
     </div>
+    <div class="hero-bus">{BUS_SVG}</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ─── SCENARIO CARD ─────────────────────────────────────────────────────────────
+vc = P["green"] if result.is_valid else P["red"]
+vl = "✓ Valid" if result.is_valid else "✗ Violations"
+tags = "".join(f'<span class="tag">{t}</span>' for t in smeta.get("tags", []))
+
+st.markdown(f"""
+<div class="sc-card">
+  <div style="flex:1;">
+    <div class="sc-name">{smeta['name']}</div>
+    <div class="sc-desc">{smeta['description']}</div>
+    <div style="margin-top:8px;">
+      {tags}
+      <span class="tag" style="color:{P['accent']};border-color:{P['accent']}40;">w_ind={w_i:.1f} · w_op={w_o:.1f} · w_all={w_g:.1f}</span>
+      <span class="valid-badge" style="background:{vc}15;color:{vc};border:1px solid {vc}40;">{vl}</span>
+    </div>
+  </div>
+  <div style="text-align:right;padding-left:20px;flex-shrink:0;">
+    <div style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:{P['accent']};line-height:1;">{N}</div>
+    <div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:{P['text3']};text-transform:uppercase;">buses</div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
 if not result.is_valid:
-    viols = "<br>".join(f"• {v}" for v in result.violations)
-    st.markdown(f"""
-    <div class="violation-banner">
-        <b>⚠ Schedule Violations</b><br>
-        <span style="font-size:12px;color:#fca5a5;">{viols}</span>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f'<div class="vbox">⚠ VIOLATIONS<br>' + "<br>".join(f"▶ {v}" for v in result.violations) + "</div>", unsafe_allow_html=True)
 
 
-# ────────────────────────────────────────────
-#  Top metrics
-# ────────────────────────────────────────────
-total_buses = len(result.bus_timelines)
-total_waits = [tl.total_wait_min for tl in result.bus_timelines]
-avg_wait = sum(total_waits) / max(len(total_waits), 1)
-max_wait = max(total_waits) if total_waits else 0
-total_trip_times = [tl.total_trip_min for tl in result.bus_timelines]
-avg_trip = sum(total_trip_times) / max(len(total_trip_times), 1)
-
-# Count buses with zero wait
-no_wait = sum(1 for w in total_waits if w < 1)
-
-st.markdown(f"""
-<div class="metric-row">
-    <div class="metric-card" style="--accent: #3b82f6;">
-        <div class="metric-label">Total Buses</div>
-        <div class="metric-value">{total_buses}</div>
-        <div class="metric-sub">across all operators</div>
-    </div>
-    <div class="metric-card" style="--accent: #22c55e;">
-        <div class="metric-label">Avg Wait</div>
-        <div class="metric-value">{avg_wait:.0f}<span style="font-size:14px">m</span></div>
-        <div class="metric-sub">per bus at chargers</div>
-    </div>
-    <div class="metric-card" style="--accent: #f59e0b;">
-        <div class="metric-label">Max Wait</div>
-        <div class="metric-value">{max_wait:.0f}<span style="font-size:14px">m</span></div>
-        <div class="metric-sub">worst single bus</div>
-    </div>
-    <div class="metric-card" style="--accent: #a855f7;">
-        <div class="metric-label">Avg Trip Time</div>
-        <div class="metric-value">{avg_trip/60:.1f}<span style="font-size:14px">h</span></div>
-        <div class="metric-sub">departure to arrival</div>
-    </div>
-    <div class="metric-card" style="--accent: #10b981;">
-        <div class="metric-label">Zero-Wait</div>
-        <div class="metric-value">{no_wait}</div>
-        <div class="metric-sub">buses with no queue</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+# ─── KPI ROW ───────────────────────────────────────────────────────────────────
+kpis = [
+    ("Avg Wait",      f"{avg_w:.0f}",      "min", "per bus at charger",        P["accent"]),
+    ("Max Wait",      f"{max_w:.0f}",      "min", "worst-case single bus",     P["red"]),
+    ("Zero-Wait",     f"{zero_w}",         "",    "buses with instant charge",  P["green"]),
+    ("Avg Trip",      f"{avg_t/60:.1f}",   "h",   "departure → destination",   P["blue"]),
+    ("Charge Events", f"{tot_ev}",         "",    "total charging stops",       P["purple"]),
+    ("Scenarios",     f"{len(all_scenarios)}", "", "loaded & testable",         P["teal"]),
+]
+html = '<div class="kpi-row">'
+for lbl, val, unit, sub, color in kpis:
+    html += f'<div class="kpi" style="--kc:{color};"><div class="kpi-lbl">{lbl}</div><div class="kpi-val">{val}<span class="kpi-unit">{unit}</span></div><div class="kpi-sub">{sub}</div></div>'
+html += "</div>"
+st.markdown(html, unsafe_allow_html=True)
 
 
-# ────────────────────────────────────────────
-#  Route map
-# ────────────────────────────────────────────
-segs = scenario_data["world"]["route"]["segments"]
-stops_display = []
-for seg in segs:
-    stops_display.append(seg["from"])
-stops_display.append(segs[-1]["to"])
-
-station_ids_set = {s["id"] for s in scenario_data["world"]["stations"]}
-
-def stop_html(stop_id, label=None):
-    is_station = stop_id in station_ids_set
-    cls = "stop-station" if is_station else "stop-terminal"
-    display = label or stop_id
-    color = STATION_COLOR.get(stop_id, "#3b82f6")
-    style = f"background: {color}22; border-color: {color};" if is_station else ""
-    return f"""
-    <div class="stop-node">
-        <div class="stop-circle {cls}" style="{style}">{stop_id}</div>
-        <div class="stop-label">{display}</div>
-    </div>
-    """
-
-stop_labels = {
-    "BLR": "Bengaluru", "KCH": "Kochi",
-    "A": "Stn A", "B": "Stn B", "C": "Stn C", "D": "Stn D"
-}
-
-route_html = '<div class="route-map">'
-for i, stop_id in enumerate(stops_display):
-    route_html += stop_html(stop_id, stop_labels.get(stop_id, stop_id))
-    if i < len(stops_display) - 1:
-        dist = segs[i]["distance_km"]
-        route_html += f"""
-        <div class="route-line">
-            <span class="route-dist">{dist}km</span>
-        </div>
-        """
-route_html += '</div>'
-
-st.markdown("""
-<div class="section-header">
-    <div class="section-dot"></div>
-    <h3>Route Overview</h3>
-</div>
-""", unsafe_allow_html=True)
-st.markdown(route_html, unsafe_allow_html=True)
+# ─── TABS ──────────────────────────────────────────────────────────────────────
+t1, t2, t3, t4, t5, t6 = st.tabs(["⚡ Route Map", "📊 Gantt", "🚌 Bus Timetable", "🔌 Station Queues", "🏢 Operators", "📋 Raw Data"])
 
 
-# ────────────────────────────────────────────
-#  Scenario data table
-# ────────────────────────────────────────────
-st.markdown("""
-<div class="section-header">
-    <div class="section-dot" style="background:#22c55e;"></div>
-    <h3>Scenario Input — Bus Manifest</h3>
-</div>
-""", unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════════
+#  TAB 1 — ROUTE MAP
+# ══════════════════════════════════════════════════════════════
+with t1:
+    st.markdown('<div class="sl"><em>■</em> Route Overview — Bengaluru → Kochi</div>', unsafe_allow_html=True)
 
-bus_rows = []
-for b in scenario_data["buses"]:
-    dir_str = "→ Kochi" if b["direction"] == "BLR->KCH" else "→ Bengaluru"
-    bus_rows.append({
-        "Bus ID": b["id"],
-        "Operator": b["operator"].upper(),
-        "Direction": dir_str,
-        "Departure": b["departure"],
-    })
-bus_df = pd.DataFrame(bus_rows)
+    segs = sdata["world"]["route"]["segments"]
+    stops = [segs[0]["from"]] + [s["to"] for s in segs]
+    stn_ids = {s["id"] for s in sdata["world"]["stations"]}
+    stop_names = {"BLR": "Bengaluru", "KCH": "Kochi",
+                  "A": "e^pump A", "B": "e^pump B", "C": "e^pump C", "D": "e^pump D"}
 
-col1, col2 = st.columns([3, 2])
-with col1:
-    st.dataframe(
-        bus_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Bus ID": st.column_config.TextColumn(width="medium"),
-            "Operator": st.column_config.TextColumn(width="small"),
-            "Direction": st.column_config.TextColumn(width="medium"),
-            "Departure": st.column_config.TextColumn(width="small"),
-        }
-    )
-with col2:
-    # Operator breakdown
-    op_counts = bus_df["Operator"].value_counts()
-    st.markdown("""
-    <div style="background:#111827;border:1px solid #1f2d3d;border-radius:10px;padding:16px;">
-        <div style="font-family:'Space Mono',monospace;font-size:11px;text-transform:uppercase;
-                    letter-spacing:0.1em;color:#6b7280;margin-bottom:12px;">Operator Breakdown</div>
-    """, unsafe_allow_html=True)
-    for op, count in op_counts.items():
-        pct = count / len(bus_df) * 100
-        color = OP_COLOR.get(op.lower(), "#6b7280")
-        st.markdown(f"""
-        <div style="margin-bottom:10px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                <span style="font-family:'Space Mono',monospace;font-size:11px;color:{color};">{op}</span>
-                <span style="font-family:'Space Mono',monospace;font-size:11px;color:#4b5563;">{count} buses</span>
-            </div>
-            <div style="height:4px;background:#1f2d3d;border-radius:2px;">
-                <div style="height:4px;width:{pct}%;background:{color};border-radius:2px;"></div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    rhtml = '<div class="rstrip">'
+    for i, sid in enumerate(stops):
+        is_stn = sid in stn_ids
+        col = STN_COLORS.get(sid, P["blue"])
+        cls = "rstn" if is_stn else "rterm"
+        style = f"background:{col}15;border-color:{col};color:{col};" if is_stn else ""
+        rhtml += f'<div class="rnode"><div class="rcircle {cls}" style="{style}">{sid}</div><div class="rname">{stop_names.get(sid, sid)}</div></div>'
+        if i < len(stops) - 1:
+            dist = segs[i]["distance_km"]
+            rhtml += f'<div class="rline"><div class="rline-inner"></div><span class="rdist">{dist}km</span></div>'
+    rhtml += "</div>"
+    st.markdown(rhtml, unsafe_allow_html=True)
 
+    st.markdown("<br>", unsafe_allow_html=True)
+    c1, c2 = st.columns([3, 2])
 
-# ────────────────────────────────────────────
-#  Per-bus timetable
-# ────────────────────────────────────────────
-st.markdown("""
-<div class="section-header">
-    <div class="section-dot" style="background:#f59e0b;"></div>
-    <h3>Per-Bus Timetable</h3>
-</div>
-""", unsafe_allow_html=True)
+    with c1:
+        st.markdown('<div class="sl"><em>■</em> e^pump Station Load</div>', unsafe_allow_html=True)
+        sorder = ["A", "B", "C", "D"]
+        scounts = {}; swaits = {}
+        for s in sorder:
+            slog = result.station_logs.get(s)
+            evs = slog.events if slog else []
+            scounts[s] = len(evs)
+            swaits[s] = (sum(e.wait_min for e in evs) / len(evs)) if evs else 0
 
-# Filter controls
-col_f1, col_f2 = st.columns([2, 2])
-with col_f1:
-    dir_filter = st.selectbox(
-        "Direction",
-        ["All", "Bengaluru → Kochi", "Kochi → Bengaluru"],
-        label_visibility="collapsed",
-    )
-with col_f2:
-    op_filter = st.selectbox(
-        "Operator",
-        ["All Operators", "KPN", "Freshbus", "Flixbus"],
-        label_visibility="collapsed",
-    )
-
-def passes_filter(tl: BusTimeline) -> bool:
-    if dir_filter == "Bengaluru → Kochi" and tl.bus.direction.value != "BLR->KCH":
-        return False
-    if dir_filter == "Kochi → Bengaluru" and tl.bus.direction.value != "KCH->BLR":
-        return False
-    if op_filter != "All Operators" and tl.bus.operator_id.lower() != op_filter.lower():
-        return False
-    return True
-
-filtered = [tl for tl in result.bus_timelines if passes_filter(tl)]
-filtered.sort(key=lambda tl: tl.departure_time_min)
-
-# Compute timeline extents for proportional bars
-all_times = []
-for tl in filtered:
-    all_times.append(tl.departure_time_min)
-    all_times.append(tl.arrival_time_min)
-t_min = min(all_times) if all_times else 0
-t_max = max(all_times) if all_times else 1
-t_span = max(t_max - t_min, 1)
-
-for tl in filtered:
-    op = tl.bus.operator_id
-    op_color = OP_COLOR.get(op, "#6b7280")
-    dir_label = "BLR → KCH" if tl.bus.direction.value == "BLR->KCH" else "KCH → BLR"
-    dir_color = "#f59e0b" if tl.bus.direction.value == "BLR->KCH" else "#a78bfa"
-
-    # Build charge stop summary
-    stations_used = tl.stations_used
-    stop_html_parts = []
-    for s_id in stations_used:
-        c = STATION_COLOR.get(s_id, "#6b7280")
-        stop_html_parts.append(
-            f'<span style="background:{c}22;color:{c};border:1px solid {c}44;'
-            f'padding:1px 8px;border-radius:4px;font-family:\'Space Mono\',monospace;'
-            f'font-size:10px;">Stn {s_id}</span>'
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=sorder, y=[scounts[s] for s in sorder], name="Buses Served",
+            marker_color=[STN_COLORS[s] for s in sorder], marker_line_width=0,
+        ))
+        fig.add_trace(go.Scatter(
+            x=sorder, y=[swaits[s] for s in sorder], name="Avg Wait (min)",
+            yaxis="y2", mode="lines+markers",
+            line=dict(color=P["red"], width=2, dash="dot"),
+            marker=dict(size=8, color=P["red"]),
+        ))
+        fig.update_layout(
+            plot_bgcolor=P["plot_bg"], paper_bgcolor=P["plot_bg"],
+            font=dict(family="JetBrains Mono", size=11, color=P["text2"]),
+            xaxis=dict(gridcolor=P["grid"]),
+            yaxis=dict(gridcolor=P["grid"], title="Buses Served"),
+            yaxis2=dict(title="Avg Wait (min)", overlaying="y", side="right", gridcolor=pcolor(P["grid"])),
+            legend=dict(bgcolor=pcolor(P["bg"]), font=dict(size=10)),
+            margin=dict(l=20, r=20, t=20, b=20), height=280, barmode="group",
         )
-    stops_html = " ".join(stop_html_parts) if stop_html_parts else \
-        '<span style="color:#4b5563;font-size:10px;">—</span>'
+        st.plotly_chart(fig, use_container_width=True)
 
-    charge_details = []
-    for ev in tl.charge_events:
-        c = STATION_COLOR.get(ev.station_id, "#6b7280")
-        wait_str = f"+{fmt_duration(ev.wait_min)}" if ev.wait_min >= 1 else "no wait"
-        charge_details.append(
-            f'<div style="font-size:11px;color:#94a3b8;padding:4px 0;'
-            f'border-bottom:1px solid #1e2736;">'
-            f'<span style="color:{c};font-family:\'Space Mono\',monospace;font-weight:700;">Stn {ev.station_id}</span>'
-            f' &nbsp; arrive <span style="color:#f1f5f9">{fmt_time(ev.arrive_time_min)}</span>'
-            f' &nbsp; charge <span style="color:#4ade80">{fmt_time(ev.charge_start_min)} → {fmt_time(ev.charge_end_min)}</span>'
-            f' &nbsp; <span style="color:{("#f87171" if ev.wait_min > 20 else "#fbbf24") if ev.wait_min > 0 else "#4ade80"}">'
-            f'{wait_str}</span></div>'
+    with c2:
+        st.markdown('<div class="sl"><em>■</em> Direction Split</div>', unsafe_allow_html=True)
+        blr_kch = sum(1 for tl in result.bus_timelines if tl.bus.direction == Direction.BLR_KCH)
+        fig2 = go.Figure(go.Pie(
+            labels=["BLR → KCH", "KCH → BLR"],
+            values=[blr_kch, N - blr_kch],
+            hole=0.62,
+            marker=dict(colors=[P["accent"], P["blue"]], line=dict(color=P["bg"], width=3)),
+            textinfo="label+percent",
+            textfont=dict(family="JetBrains Mono", size=10, color=P["text"]),
+        ))
+        fig2.update_layout(
+            plot_bgcolor=P["plot_bg"], paper_bgcolor=P["plot_bg"],
+            showlegend=False, margin=dict(l=10, r=10, t=10, b=10), height=200,
+            annotations=[dict(text=f"<b>{N}</b><br>buses", x=0.5, y=0.5,
+                              font=dict(size=14, color=P["text"], family="Bebas Neue"), showarrow=False)]
         )
-    charge_html = "\n".join(charge_details) if charge_details else \
-        '<div style="font-size:11px;color:#4b5563;">No charge events</div>'
+        st.plotly_chart(fig2, use_container_width=True)
 
-    st.markdown(f"""
-    <div class="bus-card">
-        <div class="bus-card-header">
-            <div style="display:flex;align-items:center;gap:12px;">
-                <span class="bus-id">{tl.bus.id}</span>
-                {operator_badge(op)}
-                <span style="font-size:11px;color:{dir_color};font-family:'Space Mono',monospace;">{dir_label}</span>
-            </div>
-            <div style="display:flex;gap:16px;align-items:center;">
-                <div style="text-align:right;">
-                    <div style="font-size:9px;color:#4b5563;text-transform:uppercase;letter-spacing:0.08em;">Departs</div>
-                    <div style="font-family:'Space Mono',monospace;font-size:12px;color:#94a3b8;">{fmt_time(tl.departure_time_min)}</div>
-                </div>
-                <div style="color:#374151;font-size:16px;">→</div>
-                <div style="text-align:right;">
-                    <div style="font-size:9px;color:#4b5563;text-transform:uppercase;letter-spacing:0.08em;">Arrives</div>
-                    <div style="font-family:'Space Mono',monospace;font-size:13px;color:#f1f5f9;font-weight:700;">{fmt_time(tl.arrival_time_min)}</div>
-                </div>
-                <div style="background:#1f2d3d;border-radius:6px;padding:6px 12px;text-align:center;">
-                    <div style="font-size:9px;color:#4b5563;text-transform:uppercase;">Trip</div>
-                    <div style="font-family:'Space Mono',monospace;font-size:12px;color:#60a5fa;">{fmt_duration(tl.total_trip_min)}</div>
-                </div>
-                <div style="background:{'#3b1f1f' if tl.total_wait_min > 20 else '#1a3d2b'};border-radius:6px;padding:6px 12px;text-align:center;">
-                    <div style="font-size:9px;color:#4b5563;text-transform:uppercase;">Wait</div>
-                    <div style="font-family:'Space Mono',monospace;font-size:12px;color:{'#f87171' if tl.total_wait_min > 20 else '#4ade80'};">{fmt_duration(tl.total_wait_min)}</div>
-                </div>
-            </div>
-        </div>
-        <div style="margin-bottom:10px;">{stops_html}</div>
-        <div style="border-top:1px solid #1e2736;padding-top:10px;">{charge_html}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-
-# ────────────────────────────────────────────
-#  Per-station view
-# ────────────────────────────────────────────
-st.markdown("""
-<div class="section-header">
-    <div class="section-dot" style="background:#a855f7;"></div>
-    <h3>Per-Station Queue</h3>
-</div>
-""", unsafe_allow_html=True)
-
-station_order = ["A", "B", "C", "D"]
-station_cols = st.columns(4)
-
-for col_idx, station_id in enumerate(station_order):
-    slog = result.station_logs.get(station_id)
-    s_color = STATION_COLOR.get(station_id, "#6b7280")
-
-    with station_cols[col_idx]:
-        events = slog.events if slog else []
-        total_wait_at_station = sum(e.wait_min for e in events)
-        utilisation_start = events[0].charge_start_min if events else 0
-        utilisation_end   = events[-1].charge_end_min  if events else 0
-
-        st.markdown(f"""
-        <div style="background:#111827;border:1px solid #1f2d3d;border-radius:10px;
-                    padding:16px;margin-bottom:12px;border-top:3px solid {s_color};">
-            <div style="font-family:'Space Mono',monospace;font-size:22px;font-weight:700;
-                        color:{s_color};">Station {station_id}</div>
-            <div style="font-size:11px;color:#4b5563;margin-top:2px;">
-                {len(events)} buses · {fmt_duration(total_wait_at_station)} total wait
-            </div>
-            {f'<div style="font-size:10px;color:#374151;margin-top:6px;font-family:\'Space Mono\',monospace;">{fmt_time(utilisation_start)} – {fmt_time(utilisation_end)}</div>' if events else ''}
-        </div>
-        """, unsafe_allow_html=True)
-
-        if not events:
-            st.markdown('<div style="font-size:12px;color:#374151;padding:8px;">No buses charged here</div>',
-                        unsafe_allow_html=True)
-            continue
-
-        for pos, ev in enumerate(events, 1):
-            # Find this bus's operator
-            bus_obj = next((b for b in result.bus_timelines if b.bus.id == ev.bus_id), None)
-            op_id = bus_obj.bus.operator_id if bus_obj else "unknown"
-            op_color = OP_COLOR.get(op_id, "#6b7280")
-
+        st.markdown('<div class="sl"><em>■</em> Station Utilization</div>', unsafe_allow_html=True)
+        for s in sorder:
+            col = STN_COLORS[s]; pct = int(scounts[s] / max(N, 1) * 100)
             st.markdown(f"""
-            <div class="queue-entry">
-                <div class="queue-number">{pos}</div>
-                <div style="flex:1;min-width:0;">
-                    <div class="queue-bus-id" style="color:{op_color};">{ev.bus_id}</div>
-                    <div style="font-size:10px;color:#4b5563;font-family:'Space Mono',monospace;">
-                        {fmt_time(ev.charge_start_min)} → {fmt_time(ev.charge_end_min)}
-                    </div>
+            <div style="margin-bottom:10px;">
+              <div style="display:flex;justify-content:space-between;margin-bottom:3px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:{col};">e^pump {s}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:{P['text3']};">{scounts[s]} buses · {swaits[s]:.0f}m avg</span>
+              </div>
+              <div style="height:4px;background:{P['border']};border-radius:2px;">
+                <div style="height:4px;width:{pct}%;background:{col};border-radius:2px;"></div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════
+#  TAB 2 — GANTT
+# ══════════════════════════════════════════════════════════════
+with t2:
+    st.markdown('<div class="sl"><em>■</em> Bus Journey Timeline — Drive / Wait / Charge</div>', unsafe_allow_html=True)
+
+    seg_list = sdata["world"]["route"]["segments"]
+    all_stops_fwd = [seg_list[0]["from"]] + [s["to"] for s in seg_list]
+    speed = sdata["world"]["physics"]["speed_kmph"]
+
+    buses_sorted_gantt = sorted(result.bus_timelines, key=lambda t: t.departure_time_min)
+    bus_ids = [tl.bus.id for tl in buses_sorted_gantt]
+    y_map = {b: i for i, b in enumerate(bus_ids)}
+
+    fig_g = go.Figure()
+    drive_col = "#1C2E4A" if DARK else "#D8E4F8"
+
+    for tl in buses_sorted_gantt:
+        bus = tl.bus
+        if bus.direction == Direction.BLR_KCH:
+            stops_list = all_stops_fwd; dists = [s["distance_km"] for s in seg_list]
+        else:
+            stops_list = list(reversed(all_stops_fwd)); dists = list(reversed([s["distance_km"] for s in seg_list]))
+
+        t_cur = tl.departure_time_min
+        charge_lookup = {ev.station_id: ev for ev in tl.charge_events}
+        y = y_map[bus.id]
+
+        for i in range(len(stops_list) - 1):
+            frm, to = stops_list[i], stops_list[i + 1]
+            travel = (dists[i] / speed) * 60
+            # Drive
+            fig_g.add_shape(type="rect", x0=t_cur, x1=t_cur + travel,
+                            y0=y - 0.35, y1=y + 0.35, fillcolor=drive_col, opacity=0.5, line_width=0)
+            t_cur += travel
+
+            if to in charge_lookup:
+                ev = charge_lookup[to]
+                if ev.wait_min > 0.5:
+                    fig_g.add_shape(type="rect", x0=ev.arrive_time_min, x1=ev.charge_start_min,
+                                    y0=y - 0.35, y1=y + 0.35, fillcolor=P["red"], opacity=0.75, line_width=0)
+                sc = STN_COLORS.get(to, P["accent"])
+                fig_g.add_shape(type="rect", x0=ev.charge_start_min, x1=ev.charge_end_min,
+                                y0=y - 0.35, y1=y + 0.35, fillcolor=sc, opacity=1.0, line_width=0)
+                t_cur = ev.charge_end_min
+
+    # Legend traces
+    for lbl, col, op in [("Drive", drive_col, 0.5), ("Wait", P["red"], 0.75),
+                          ("Charge A", STN_COLORS["A"], 1), ("Charge B", STN_COLORS["B"], 1),
+                          ("Charge C", STN_COLORS["C"], 1), ("Charge D", STN_COLORS["D"], 1)]:
+        fig_g.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name=lbl,
+                                   marker=dict(size=10, color=col, symbol="square", opacity=op), showlegend=True))
+
+    all_t = []
+    for tl in result.bus_timelines:
+        all_t.append(tl.departure_time_min)
+        all_t.append(tl.arrival_time_min)
+    t_lo, t_hi = min(all_t) - 10, max(all_t) + 10
+    ticks = list(range(int(t_lo // 30) * 30, int(t_hi // 30 + 2) * 30, 30))
+
+    fig_g.update_layout(
+        plot_bgcolor=P["plot_bg"], paper_bgcolor=P["plot_bg"],
+        font=dict(family="JetBrains Mono", size=10, color=P["text2"]),
+        xaxis=dict(gridcolor=P["grid"], range=[t_lo, t_hi],
+                   tickvals=ticks, ticktext=[fmt(v) for v in ticks], title="Time"),
+        yaxis=dict(gridcolor=pcolor(P["grid"]), tickmode="array",
+                   tickvals=list(range(len(bus_ids))), ticktext=bus_ids, title=""),
+        height=max(350, len(bus_ids) * 22 + 80),
+        margin=dict(l=110, r=20, t=40, b=40),
+        legend=dict(bgcolor=pcolor(P["bg"]), font=dict(size=10, family="JetBrains Mono"),
+                    orientation="h", x=0, y=1.05),
+        showlegend=True,
+    )
+    st.plotly_chart(fig_g, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════
+#  TAB 3 — BUS TIMETABLE
+# ══════════════════════════════════════════════════════════════
+with t3:
+    cf1, cf2, cf3 = st.columns(3)
+    with cf1:
+        df = st.selectbox("Dir", ["All", "BLR → KCH", "KCH → BLR"], label_visibility="collapsed")
+    with cf2:
+        of = st.selectbox("Op", ["All"] + [o["id"].upper() for o in sdata["world"]["operators"]], label_visibility="collapsed")
+    with cf3:
+        sf = st.selectbox("Sort", ["Departure", "Wait ↓", "Trip ↓"], label_visibility="collapsed")
+
+    flt = result.bus_timelines
+    if df == "BLR → KCH": flt = [t for t in flt if t.bus.direction == Direction.BLR_KCH]
+    elif df == "KCH → BLR": flt = [t for t in flt if t.bus.direction == Direction.KCH_BLR]
+    if of != "All": flt = [t for t in flt if t.bus.operator_id.upper() == of]
+    if sf == "Departure": flt = sorted(flt, key=lambda t: t.departure_time_min)
+    elif sf == "Wait ↓": flt = sorted(flt, key=lambda t: -t.total_wait_min)
+    else: flt = sorted(flt, key=lambda t: -t.total_trip_min)
+
+    st.markdown(f'<div class="sl"><em>■</em> {len(flt)} Buses</div>', unsafe_allow_html=True)
+
+    for tl in flt:
+        bus = tl.bus
+        dc = P["accent"] if bus.direction == Direction.BLR_KCH else P["purple"]
+        ds = "BLR → KCH" if bus.direction == Direction.BLR_KCH else "KCH → BLR"
+        wc = P["green"] if tl.total_wait_min < 1 else (P["accent"] if tl.total_wait_min < 30 else P["red"])
+
+        crows = ""
+        for ev in tl.charge_events:
+            sc = STN_COLORS.get(ev.station_id, P["text3"])
+            crows += f"""
+            <div style="display:flex;align-items:center;gap:14px;padding:6px 0;border-top:1px solid {P['border']};flex-wrap:wrap;">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:{sc};min-width:64px;">e^pump {ev.station_id}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:{P['text2']};">arrive <b style="color:{P['text']}">{fmt(ev.arrive_time_min)}</b></span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:{P['text2']};">charge <b style="color:{P['green']}">{fmt(ev.charge_start_min)}→{fmt(ev.charge_end_min)}</b></span>
+              {wait_chip(ev.wait_min)}
+            </div>"""
+        if not crows:
+            crows = f'<div style="font-size:11px;color:{P["text3"]};padding-top:6px;">No charges scheduled</div>'
+
+        schips = "".join(
+            f'<span style="background:{STN_COLORS.get(s,P["text3"])}15;color:{STN_COLORS.get(s,P["text3"])};border:1px solid {STN_COLORS.get(s,P["text3"])}40;padding:2px 8px;border-radius:4px;font-family:\'JetBrains Mono\',monospace;font-size:9px;margin-right:4px;">{s}</span>'
+            for s in tl.stations_used
+        ) or f'<span style="color:{P["text3"]};font-size:10px;">—</span>'
+
+        st.markdown(f"""
+        <div class="bus-row">
+          <div style="min-width:105px;">
+            <div class="bus-id">{bus.id}</div>
+            <div style="margin-top:5px;">{op_pill(bus.operator_id)}</div>
+            <div style="margin-top:5px;"><span style="background:{dc}15;color:{dc};padding:2px 7px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:9px;">{ds}</span></div>
+          </div>
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-end;">
+              <div><div class="mini-lbl">Departs</div><div class="mini-val" style="color:{P['text2']};">{fmt(tl.departure_time_min)}</div></div>
+              <div><div class="mini-lbl">Arrives</div><div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:{P['text']};">{fmt(tl.arrival_time_min)}</div></div>
+              <div><div class="mini-lbl">Trip</div><div class="mini-val" style="color:{P['blue']};">{dur(tl.total_trip_min)}</div></div>
+              <div><div class="mini-lbl">Wait</div><div class="mini-val" style="color:{wc};">{dur(tl.total_wait_min)}</div></div>
+              <div style="margin-left:auto;">{schips}</div>
+            </div>
+            {crows}
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════
+#  TAB 4 — STATION QUEUES
+# ══════════════════════════════════════════════════════════════
+with t4:
+    st.markdown('<div class="sl"><em>■</em> e^pump Charging Queues</div>', unsafe_allow_html=True)
+
+    sorder = ["A", "B", "C", "D"]
+    cols4 = st.columns(2)
+
+    for idx, sid in enumerate(sorder):
+        slog = result.station_logs.get(sid)
+        evs = slog.events if slog else []
+        col = STN_COLORS[sid]
+        avg_wt = sum(e.wait_min for e in evs) / max(len(evs), 1)
+        tot_wt = sum(e.wait_min for e in evs)
+
+        with cols4[idx % 2]:
+            st.markdown(f"""
+            <div class="sq-card">
+              <div class="sq-hd" style="border-top:3px solid {col};">
+                <div>
+                  <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:{col};letter-spacing:0.04em;">e^pump {sid}</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:{P['text3']};margin-top:2px;">
+                    {len(evs)} buses · avg {avg_wt:.0f}m wait · total {tot_wt:.0f}m
+                  </div>
                 </div>
-                {wait_badge(ev.wait_min)}
+                <div style="text-align:right;">
+                  <div style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:{col};line-height:1;">{len(evs)}</div>
+                  <div style="font-size:8px;color:{P['text3']};text-transform:uppercase;">buses</div>
+                </div>
+              </div>
+            """, unsafe_allow_html=True)
+
+            if not evs:
+                st.markdown(f'<div style="padding:14px;font-size:11px;color:{P["text3"]};">No buses at this station</div>', unsafe_allow_html=True)
+            else:
+                for pos, ev in enumerate(evs, 1):
+                    btl = next((t for t in result.bus_timelines if t.bus.id == ev.bus_id), None)
+                    op = btl.bus.operator_id if btl else "?"
+                    oc = OP_COLORS.get(op, P["text3"])
+                    st.markdown(f"""
+                    <div class="sq-row">
+                      <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:{col}30;min-width:24px;">{pos}</div>
+                      <div style="flex:1;">
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap;">
+                          <span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:{oc};">{ev.bus_id}</span>
+                          {op_pill(op)} {wait_chip(ev.wait_min)}
+                        </div>
+                        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:{P['text2']};">
+                          arrive <b style="color:{P['text']}">{fmt(ev.arrive_time_min)}</b>
+                          → charge <b style="color:{P['green']}">{fmt(ev.charge_start_min)}→{fmt(ev.charge_end_min)}</b>
+                        </div>
+                      </div>
+                    </div>""", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="sl"><em>■</em> Station Timeline</div>', unsafe_allow_html=True)
+    fig_st = go.Figure()
+    all_t2 = []
+    for sid in sorder:
+        slog = result.station_logs.get(sid)
+        evs = slog.events if slog else []
+        col = STN_COLORS[sid]
+        for ev in evs:
+            all_t2 += [ev.arrive_time_min, ev.charge_end_min]
+            btl = next((t for t in result.bus_timelines if t.bus.id == ev.bus_id), None)
+            op = btl.bus.operator_id if btl else "?"
+            fig_st.add_trace(go.Bar(
+                x=[ev.charge_end_min - ev.charge_start_min], base=[ev.charge_start_min],
+                y=[f"e^pump {sid}"], orientation="h", marker_color=col, marker_line_width=0,
+                showlegend=False, width=0.5,
+                hovertemplate=f"<b>{ev.bus_id}</b> ({op})<br>Charge: {fmt(ev.charge_start_min)}→{fmt(ev.charge_end_min)}<br>Wait: {ev.wait_min:.0f}m<extra></extra>",
+            ))
+            if ev.wait_min > 0.5:
+                fig_st.add_trace(go.Bar(
+                    x=[ev.wait_min], base=[ev.arrive_time_min],
+                    y=[f"e^pump {sid}"], orientation="h", marker_color=P["red"],
+                    marker_line_width=0, opacity=0.5, showlegend=False, width=0.5,
+                    hovertemplate=f"<b>{ev.bus_id}</b><br>Waiting: {fmt(ev.arrive_time_min)}→{fmt(ev.charge_start_min)}<br>{ev.wait_min:.0f}m<extra></extra>",
+                ))
+
+    t_lo2 = min(all_t2) - 10 if all_t2 else 1100
+    t_hi2 = max(all_t2) + 10 if all_t2 else 1400
+    tv = list(range(int(t_lo2 // 30) * 30, int(t_hi2 // 30 + 2) * 30, 30))
+    fig_st.update_layout(
+        plot_bgcolor=P["plot_bg"], paper_bgcolor=P["plot_bg"], barmode="overlay",
+        font=dict(family="JetBrains Mono", size=10, color=P["text2"]),
+        xaxis=dict(range=[t_lo2, t_hi2], gridcolor=P["grid"], tickvals=tv, ticktext=[fmt(v) for v in tv]),
+        yaxis=dict(gridcolor=pcolor(P["grid"])),
+        height=220, margin=dict(l=80, r=20, t=10, b=40),
+    )
+    st.plotly_chart(fig_st, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════
+#  TAB 5 — OPERATORS
+# ══════════════════════════════════════════════════════════════
+with t5:
+    st.markdown('<div class="sl"><em>■</em> Operator Fleet Performance</div>', unsafe_allow_html=True)
+
+    op_stats = {}
+    for tl in result.bus_timelines:
+        op = tl.bus.operator_id
+        if op not in op_stats:
+            op_stats[op] = {"buses": 0, "tw": 0, "mw": 0, "tt": 0, "waits": []}
+        op_stats[op]["buses"] += 1
+        op_stats[op]["tw"] += tl.total_wait_min
+        op_stats[op]["mw"] = max(op_stats[op]["mw"], tl.total_wait_min)
+        op_stats[op]["tt"] += tl.total_trip_min
+        op_stats[op]["waits"].append(tl.total_wait_min)
+    for op, s in op_stats.items():
+        s["avg_w"] = s["tw"] / max(s["buses"], 1)
+        s["avg_t"] = s["tt"] / max(s["buses"], 1)
+
+    ops = sorted(op_stats.keys())
+    oc5 = st.columns(len(ops))
+    for i, op in enumerate(ops):
+        s = op_stats[op]; col = OP_COLORS.get(op, P["text3"])
+        wc = P["green"] if s["avg_w"] < 10 else (P["accent"] if s["avg_w"] < 30 else P["red"])
+        with oc5[i]:
+            st.markdown(f"""
+            <div style="background:{P['card']};border:1px solid {P['border']};border-top:4px solid {col};border-radius:12px;padding:18px;margin-bottom:16px;">
+              <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:{col};letter-spacing:0.04em;">{op.upper()}</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
+                <div><div style="font-family:'JetBrains Mono',monospace;font-size:8px;text-transform:uppercase;letter-spacing:0.1em;color:{P['text3']};">Buses</div>
+                  <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:{P['text']};">{s['buses']}</div></div>
+                <div><div style="font-family:'JetBrains Mono',monospace;font-size:8px;text-transform:uppercase;letter-spacing:0.1em;color:{P['text3']};">Avg Wait</div>
+                  <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:{wc};">{s['avg_w']:.0f}<span style="font-size:14px;">m</span></div></div>
+                <div><div style="font-family:'JetBrains Mono',monospace;font-size:8px;text-transform:uppercase;letter-spacing:0.1em;color:{P['text3']};">Max Wait</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:14px;color:{P['text2']};">{s['mw']:.0f}m</div></div>
+                <div><div style="font-family:'JetBrains Mono',monospace;font-size:8px;text-transform:uppercase;letter-spacing:0.1em;color:{P['text3']};">Avg Trip</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:14px;color:{P['text2']};">{s['avg_t']/60:.1f}h</div></div>
+              </div>
             </div>
             """, unsafe_allow_html=True)
 
+    ca, cb = st.columns(2)
+    with ca:
+        st.markdown('<div class="sl"><em>■</em> Average Wait per Operator</div>', unsafe_allow_html=True)
+        fig5a = go.Figure(go.Bar(
+            x=ops, y=[op_stats[o]["avg_w"] for o in ops],
+            marker_color=[OP_COLORS.get(o, P["text3"]) for o in ops], marker_line_width=0,
+            text=[f"{op_stats[o]['avg_w']:.1f}m" for o in ops], textposition="outside",
+            textfont=dict(family="JetBrains Mono", size=11, color=P["text2"]),
+        ))
+        fig5a.update_layout(
+            plot_bgcolor=P["plot_bg"], paper_bgcolor=P["plot_bg"],
+            font=dict(family="JetBrains Mono", size=11, color=P["text2"]),
+            xaxis=dict(gridcolor=pcolor(P["grid"])),
+            yaxis=dict(gridcolor=P["grid"], title="Avg Wait (min)"),
+            margin=dict(l=20, r=20, t=20, b=20), height=260, showlegend=False,
+        )
+        st.plotly_chart(fig5a, use_container_width=True)
 
-# ────────────────────────────────────────────
-#  Weight explanation footer
-# ────────────────────────────────────────────
-st.markdown("<br>", unsafe_allow_html=True)
-st.markdown("""
-<div style="background:#0d1117;border:1px solid #1e2736;border-radius:10px;padding:20px;margin-top:16px;">
-    <div style="font-family:'Space Mono',monospace;font-size:11px;text-transform:uppercase;
-                letter-spacing:0.1em;color:#374151;margin-bottom:12px;">Active Weights</div>
-    <div style="display:flex;gap:24px;flex-wrap:wrap;">
-""", unsafe_allow_html=True)
+    with cb:
+        st.markdown('<div class="sl"><em>■</em> Wait Distribution</div>', unsafe_allow_html=True)
+        fig5b = go.Figure()
+        for op in ops:
+            fig5b.add_trace(go.Box(
+                y=op_stats[op]["waits"], name=op.upper(),
+                marker_color=OP_COLORS.get(op, P["text3"]),
+                line=dict(color=OP_COLORS.get(op, P["text3"])),
+                fillcolor="rgba(0,0,0,0)", boxmean="sd",
+            ))
+        fig5b.update_layout(
+            plot_bgcolor=P["plot_bg"], paper_bgcolor=P["plot_bg"],
+            font=dict(family="JetBrains Mono", size=11, color=P["text2"]),
+            xaxis=dict(gridcolor=pcolor(P["grid"])),
+            yaxis=dict(gridcolor=P["grid"], title="Wait (min)"),
+            margin=dict(l=20, r=20, t=20, b=20), height=260, showlegend=False,
+        )
+        st.plotly_chart(fig5b, use_container_width=True)
 
-weight_descs = {
-    "Individual": (w_individual, "Penalises long waits for a single bus. High → every bus gets treated fairly."),
-    "Operator":   (w_operator,   "Penalises operator-level imbalance. High → KPN/Freshbus/Flixbus get equitable throughput."),
-    "Overall":    (w_overall,    "Penalises total network delay. High → earliest-arriving bus always wins."),
-}
-for label, (val, desc) in weight_descs.items():
-    bar_w = int(val / 3.0 * 100)
-    st.markdown(f"""
-    <div style="flex:1;min-width:180px;">
-        <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-            <span style="font-family:'Space Mono',monospace;font-size:11px;color:#94a3b8;">{label}</span>
-            <span style="font-family:'Space Mono',monospace;font-size:11px;color:#3b82f6;">{val:.1f}</span>
-        </div>
-        <div style="height:3px;background:#1f2d3d;border-radius:2px;margin-bottom:6px;">
-            <div style="height:3px;width:{bar_w}%;background:#3b82f6;border-radius:2px;"></div>
-        </div>
-        <div style="font-size:11px;color:#4b5563;">{desc}</div>
-    </div>
-    """, unsafe_allow_html=True)
 
-st.markdown("</div></div>", unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════════
+#  TAB 6 — RAW DATA
+# ══════════════════════════════════════════════════════════════
+with t6:
+    st.markdown('<div class="sl"><em>■</em> Bus Manifest</div>', unsafe_allow_html=True)
+    rows = [{"Bus ID": b["id"], "Operator": b["operator"].upper(),
+             "Direction": "→ Kochi" if b["direction"] == "BLR->KCH" else "→ Bengaluru",
+             "Departure": b["departure"]} for b in buses_raw]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
+                 height=min(500, len(rows) * 35 + 40))
+
+    st.markdown('<div class="sl"><em>■</em> Scenario Config</div>', unsafe_allow_html=True)
+    st.code(json.dumps({k: v for k, v in sdata.items() if k != "buses"}, indent=2), language="json")
+
+    full_json = json.dumps(sdata, indent=2)
+    st.download_button("⬇ Download Scenario JSON", data=full_json,
+                       file_name=f"{smeta['id']}.json", mime="application/json")
